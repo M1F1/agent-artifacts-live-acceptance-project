@@ -1,0 +1,72 @@
+name: AART consumer acceptance
+
+# Reconciles the committed installation state against what both registries currently publish.
+# It never installs into the checkout: a run that has to change a file is a failing run.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install the released AART executable
+        env:
+          AART_VERSION: 2.0.0
+        run: |
+          python -m pip install --no-deps \
+            "https://github.com/M1F1/agent-artifacts/releases/download/v${AART_VERSION}/agent_artifacts-${AART_VERSION}-py3-none-any.whl"
+          test "$(aart --version)" = "agent-artifacts ${AART_VERSION}"
+
+      - name: Configure both canonical sources
+        run: |
+          aart source add --alias registry-a --kind registry-git \
+            --location https://github.com/M1F1/agent-artifacts-registry.git --ref main --default
+          aart source add --alias registry-b --kind registry-git \
+            --location https://github.com/M1F1/agent-artifacts-registry-2.git --ref main --no-default
+          aart source health
+
+      - name: Reconcile the committed installation state
+        run: aart marketplace status --profile claude --scope project --json > "$RUNNER_TEMP/status.json"
+
+      - name: Fail on drift or missing installations
+        env:
+          EXPECTED_INSTALLATIONS: "11"
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sys
+
+          report = json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "status.json")))
+          items = report.get("items", ())
+          for item in items:
+              print(item["key"], item["status"], item.get("detail", ""))
+          if not report.get("ok"):
+              sys.exit("marketplace status did not report ok")
+          expected = int(os.environ["EXPECTED_INSTALLATIONS"])
+          if len(items) != expected:
+              sys.exit(f"expected {expected} installations, found {len(items)}")
+          drifted = [item["key"] for item in items if item["status"] != "current"]
+          if drifted:
+              sys.exit(f"not current: {', '.join(drifted)}")
+          print(f"{len(items)} installations current")
+          PY
+
+      - name: Prove the run changed nothing in the checkout
+        run: git diff --exit-code

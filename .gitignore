@@ -1,0 +1,3 @@
+# AART writes an empty transaction lock beside the durable manifest. The manifest is the record
+# worth committing; the lock is per-process state.
+.agent-artifacts/state.lock
